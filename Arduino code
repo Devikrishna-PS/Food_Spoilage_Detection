@@ -1,0 +1,417 @@
+#include <Wire.h>
+#include <U8g2lib.h>
+#include <DHT.h>
+
+// =====================================================
+// OLED
+// =====================================================
+
+U8G2_SH1106_128X64_NONAME_1_HW_I2C display(U8G2_R0);
+
+// =====================================================
+// DHT11
+// =====================================================
+
+#define DHT_PIN 2
+#define DHT_TYPE DHT11
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+// =====================================================
+// MQ135
+// =====================================================
+
+#define MQ_PIN A0
+
+// =====================================================
+// LEDs & Buzzer
+// =====================================================
+
+#define GREEN_LED 5
+#define RED_LED 6
+#define BUZZER 8
+
+// =====================================================
+// THRESHOLDS
+// =====================================================
+
+// Based on your measured ranges:
+//
+// Empty box       = 150 - 190
+// Fresh banana    = 160 - 200
+// Fresh apple     = 140 - 160
+// Spoiled pickle  = 250 - 300
+// Spoiled banana  = 300 - 500
+// Spoiled tomato  = 300 - 600
+// Spoiled lemon   = 250 - 350
+//
+// Practical starting threshold:
+
+#define FRESH_LIMIT 230
+
+// Food detection difference from empty-box baseline
+#define FOOD_CHANGE 50
+
+// Number of readings for averaging
+#define NUM_READINGS 5
+
+// =====================================================
+// VARIABLES
+// =====================================================
+
+int baseGas = 0;
+bool foodDetected = false;
+
+
+// =====================================================
+// FUNCTION: READ AVERAGE MQ135
+// =====================================================
+
+int getAverageGas() {
+
+  long total = 0;
+
+  for (int i = 0; i < NUM_READINGS; i++) {
+
+    total += analogRead(MQ_PIN);
+
+    delay(200);
+  }
+
+  return total / NUM_READINGS;
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+
+  Serial.begin(9600);
+
+  dht.begin();
+  display.begin();
+
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+
+  // Everything OFF at startup
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+
+  noTone(BUZZER);
+
+
+  // ===================================================
+  // WELCOME SCREEN
+  // ===================================================
+
+  display.firstPage();
+
+  do {
+
+    display.setFont(u8g2_font_6x12_tf);
+
+    display.drawStr(20, 25, "SMART FOOD");
+    display.drawStr(20, 40, "DETECTOR");
+
+  } while (display.nextPage());
+
+  delay(2000);
+
+
+  // ===================================================
+  // CALIBRATION
+  // ===================================================
+
+  display.firstPage();
+
+  do {
+
+    display.setFont(u8g2_font_6x12_tf);
+
+    display.drawStr(15, 25, "CALIBRATING...");
+    display.drawStr(15, 42, "PLEASE WAIT");
+
+  } while (display.nextPage());
+
+
+  // ===================================================
+  // EMPTY BOX BASELINE
+  // ===================================================
+
+  long total = 0;
+
+  for (int i = 0; i < 20; i++) {
+
+    total += analogRead(MQ_PIN);
+
+    delay(200);
+  }
+
+  baseGas = total / 20;
+
+
+  Serial.print("Base Gas Value: ");
+  Serial.println(baseGas);
+
+
+  // LEDs and buzzer OFF
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+
+  noTone(BUZZER);
+
+
+  // ===================================================
+  // WAITING FOR FOOD
+  // ===================================================
+
+  display.firstPage();
+
+  do {
+
+    display.setFont(u8g2_font_6x12_tf);
+
+    display.drawStr(0, 15, "SMART FOOD DETECTOR");
+
+    display.drawStr(15, 35, "NO FOOD");
+
+    display.drawStr(15, 50, "PLACE FOOD");
+
+  } while (display.nextPage());
+
+  delay(1000);
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop() {
+
+  // ===================================================
+  // READ MQ135 AVERAGE
+  // ===================================================
+
+  int gasValue = getAverageGas();
+
+
+  // ===================================================
+  // READ DHT11
+  // ===================================================
+
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+
+  // If DHT reading fails
+
+  if (isnan(temp) || isnan(hum)) {
+
+    temp = 0;
+    hum = 0;
+  }
+
+
+  // ===================================================
+  // FOOD DETECTION
+  // =====================================================
+
+  if (!foodDetected) {
+
+    // Detect food only when gas changes
+    // significantly from empty-box baseline
+
+    if (abs(gasValue - baseGas) >= FOOD_CHANGE) {
+
+      foodDetected = true;
+
+      Serial.println("FOOD DETECTED!");
+    }
+
+    else {
+
+      // ===============================================
+      // NO FOOD
+      // ===============================================
+
+      digitalWrite(GREEN_LED, LOW);
+      digitalWrite(RED_LED, LOW);
+
+      noTone(BUZZER);
+
+
+      display.firstPage();
+
+      do {
+
+        display.setFont(u8g2_font_6x12_tf);
+
+        display.drawStr(0, 15, "SMART FOOD DETECTOR");
+
+        display.drawStr(15, 35, "NO FOOD");
+
+        display.drawStr(15, 50, "PLACE FOOD");
+
+      } while (display.nextPage());
+
+
+      Serial.print("No food detected | Gas: ");
+      Serial.println(gasValue);
+
+      delay(1000);
+
+      return;
+    }
+  }
+
+
+  // ===================================================
+  // FRESHNESS CALCULATION
+  // ===================================================
+
+  int freshness;
+
+  // Gas 100  -> 100% freshness
+  // Gas 600  ->   0% freshness
+
+  freshness = map(gasValue, 100, 600, 100, 0);
+
+  freshness = constrain(freshness, 0, 100);
+
+
+  // ===================================================
+  // FRESH / SPOILED
+  // =====================================================
+
+  char status[15];
+
+
+  if (gasValue < FRESH_LIMIT) {
+
+    // ===============================================
+    // FRESH
+    // ===============================================
+
+    strcpy(status, "FRESH");
+
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(RED_LED, LOW);
+
+    noTone(BUZZER);
+  }
+
+  else {
+
+    // ===============================================
+    // SPOILED
+    // ===============================================
+
+    strcpy(status, "SPOILED");
+
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(RED_LED, HIGH);
+
+    tone(BUZZER, 1000);
+  }
+
+
+  // ===================================================
+  // OLED DISPLAY
+  // ===================================================
+
+  display.firstPage();
+
+  do {
+
+    display.setFont(u8g2_font_6x12_tf);
+
+    display.drawStr(0, 10, "SMART FOOD DETECTOR");
+
+
+    char line[25];
+    char tempStr[10];
+    char humStr[10];
+
+
+    // -----------------------------------------------
+    // Temperature
+    // -----------------------------------------------
+
+    dtostrf(temp, 4, 1, tempStr);
+
+    display.drawStr(0, 22, "Temp:");
+    display.drawStr(45, 22, tempStr);
+    display.drawStr(80, 22, "C");
+
+
+    // -----------------------------------------------
+    // Humidity
+    // -----------------------------------------------
+
+    dtostrf(hum, 4, 0, humStr);
+
+    display.drawStr(0, 34, "Humidity:");
+    display.drawStr(65, 34, humStr);
+    display.drawStr(100, 34, "%");
+
+
+    // -----------------------------------------------
+    // Gas Value
+    // -----------------------------------------------
+
+    sprintf(line, "Gas: %d", gasValue);
+
+    display.drawStr(0, 46, line);
+
+
+    // -----------------------------------------------
+    // Freshness
+    // -----------------------------------------------
+
+    sprintf(line, "Freshness: %d%%", freshness);
+
+    display.drawStr(0, 58, line);
+
+
+    // -----------------------------------------------
+    // Status
+    // -----------------------------------------------
+
+    display.drawStr(82, 58, status);
+
+
+  } while (display.nextPage());
+
+
+  // ===================================================
+  // SERIAL MONITOR
+  // =====================================================
+
+  Serial.print("Temperature: ");
+  Serial.print(temp);
+
+  Serial.print(" C | Humidity: ");
+  Serial.print(hum);
+
+  Serial.print("% | Gas Average: ");
+  Serial.print(gasValue);
+
+  Serial.print(" | Base: ");
+  Serial.print(baseGas);
+
+  Serial.print(" | Freshness: ");
+  Serial.print(freshness);
+
+  Serial.print("% | Status: ");
+  Serial.println(status);
+
+
+  delay(2000);
+}
